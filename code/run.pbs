@@ -1,32 +1,81 @@
 #!/bin/bash
 #SBATCH --job-name=mpi         # Job name
-#SBATCH --nodes=3                        # Number of nodes
+#SBATCH --nodes=2                    # Number of nodes
 #SBATCH --ntasks-per-node=16              # Tasks per node
-#SBATCH --ntasks-per-node=2
-#SBATCH --gpus-per-node=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
 #SBATCH --time=08:00:00                   # Time limit
-#SBATCH --partition=markov_gpu                   # Partition name
-#SBATCH --account=sxk1942_csds451        # Account name
+#SBATCH --partition=gpu                   # Partition name
+#SBATCH --account=llm_workshop2024        # Account name
 #SBATCH --output=mpi_hello.out            # Standard output
 #SBATCH --error=mpi_hello.err             # Standard error
+#SBATCH --constraint=gpul40s 
+#SBATCH --mem=200G
+# Change to the working directory
 
 # Change to the working directory
-cd /home/yxy1421/Disheng/Github/Distributed_training/code
-# cd /home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code
+cd /home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code
+
+# Load modules
+module load OpenMPI/4.0.3-GCC-11.2.0
+module load Miniconda3 
+source activate /home/dxl952/.conda/envs/hpc
+export PATH=/home/dxl952/.conda/envs/hpc/bin:$PATH
+echo "Python Path: $(which python)"
+
+# Set environment variables
+export MASTER_ADDR=$(hostname)
+export MASTER_PORT=12345
+export UCX_TLS=rc,sm,self
+export UCX_IB_REG_METHODS=rcache
+export UCX_MEMTYPE_CACHE=n
+export UCX_NET_DEVICES=mlx5_0:1
+export UCX_LOG_LEVEL=warn
+
+# Debugging information
+echo "Running on nodes:"
+scontrol show hostnames $SLURM_NODELIST > nodefile
+cat nodefile
+echo "CUDA devices available:"
+nvidia-smi
+mpirun --version
+ucx_info -v
+
+# Define executable
+EXEC=/home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code/test_mpi4py.py
+
+# Calculate total number of tasks
+NP=$SLURM_NTASKS
+echo "Total number of processes: $NP"
+
+# Run the MPI program
+mpirun -np $NP -hostfile nodefile python $EXEC
+
+# Check for success or failure
+if [ $? -ne 0 ]; then
+    echo "MPI job failed!"
+    exit 1
+fi
+
+echo "MPI job completed successfully!"
+
+
+cd /home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code
 
 # Load MPI module
 module load OpenMPI/4.0.3-GCC-9.3.0
 
 module load Miniconda3 
-source activate /home/yxy1421/Disheng/env/lds
-
+source activate /home/dxl952/.conda/envs/hpc
+export PATH=/home/dxl952/.conda/envs/hpc/bin:$PATH
+echo $(which python)
 # Set environment variables for distributed training
 export MASTER_ADDR=$(hostname)
 export MASTER_PORT=12345
 
 
 # Define executable
-EXEC=./test_mpi4py.py
+EXEC=/home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code/test_mpi4py.py
 
 # Generate node file from SLURM_NODELIST
 scontrol show hostnames $SLURM_NODELIST > nodefile

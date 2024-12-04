@@ -85,3 +85,4 @@ for epoch in range(epochs):
 
 # Cleanup
 dist.destroy_process_group()
+dist.destroy_process_group()

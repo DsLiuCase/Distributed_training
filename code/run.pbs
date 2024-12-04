@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=mpi         # Job name
+#SBATCH --nodes=3                        # Number of nodes
+#SBATCH --ntasks-per-node=16              # Tasks per node
+#SBATCH --ntasks-per-node=2
+#SBATCH --gpus-per-node=2
+#SBATCH --time=08:00:00                   # Time limit
+#SBATCH --partition=markov_gpu                   # Partition name
+#SBATCH --account=sxk1942_csds451        # Account name
+#SBATCH --output=mpi_hello.out            # Standard output
+#SBATCH --error=mpi_hello.err             # Standard error
+
+# Change to the working directory
+cd /home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code
+
+# Load MPI module
+module load OpenMPI/4.0.3-GCC-9.3.0
+
+module load Miniconda3 
+source activate /home/dxl952/.conda/envs/hpc
+
+# Set environment variables for distributed training
+export MASTER_ADDR=$(hostname)
+export MASTER_PORT=12345
+
+
+# Define executable
+EXEC=/home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code/test_mpi4py.py
+
+# Generate node file from SLURM_NODELIST
+scontrol show hostnames $SLURM_NODELIST > nodefile
+
+# Calculate total number of tasks
+NP=$SLURM_NTASKS
+
+# Print debugging information
+echo "Running on nodes:"
+cat nodefile
+echo "Total number of processes: $NP"
+
+# Run the MPI program
+mpirun -np $NP -hostfile nodefile python $EXEC
+
+# Check for success or failure
+if [ $? -ne 0 ]; then
+    echo "MPI job failed!"
+    exit 1
+fi
+
+echo "MPI job completed successfully!"

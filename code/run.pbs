@@ -11,13 +11,14 @@
 #SBATCH --error=mpi_hello.err             # Standard error
 
 # Change to the working directory
-cd /home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code
+cd /home/yxy1421/Disheng/Github/Distributed_training/code
+# cd /home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code
 
 # Load MPI module
 module load OpenMPI/4.0.3-GCC-9.3.0
 
 module load Miniconda3 
-source activate /home/dxl952/.conda/envs/hpc
+source activate /home/yxy1421/Disheng/env/lds
 
 # Set environment variables for distributed training
 export MASTER_ADDR=$(hostname)
@@ -25,7 +26,7 @@ export MASTER_PORT=12345
 
 
 # Define executable
-EXEC=/home/dxl952/Cource/High_performance_AI/project/Llama3_1b/Distributed_training/code/test_mpi4py.py
+EXEC=./test_mpi4py.py
 
 # Generate node file from SLURM_NODELIST
 scontrol show hostnames $SLURM_NODELIST > nodefile

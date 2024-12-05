@@ -12,10 +12,10 @@ from datasets import load_dataset
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
+branch = 1  # Set branch (1 for all ranks, 2 for only rank 0)
 # Initialize wandb (only on rank 0)
 if MPI.COMM_WORLD.Get_rank() == 0:
-    wandb.init(project="llama-distributed", name="data-splitting-distributed")
+    wandb.init(project="llama-distributed", name="2 nodes, 1 gpu in each node; inference in all ranks")
 
 # Initialize MPI
 comm = MPI.COMM_WORLD
@@ -56,8 +56,8 @@ from torch.utils.data.distributed import DistributedSampler
 import torch
 
 # Load a subset of the SQuAD 2.0 dataset
-NUM_TRAIN_EXAMPLES = 10  # Define the number of training examples to use
-NUM_VAL_EXAMPLES = 4  # Define the number of validation examples to use
+NUM_TRAIN_EXAMPLES = 100  # Define the number of training examples to use
+NUM_VAL_EXAMPLES = 10  # Define the number of validation examples to use
 
 dataset = load_dataset("squad_v2")
 train_data = dataset["train"].select(range(min(len(dataset["train"]), NUM_TRAIN_EXAMPLES)))
@@ -106,9 +106,81 @@ train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=1
 val_sampler = DistributedSampler(validation_dataset, num_replicas=size, rank=rank)
 val_dataloader = DataLoader(validation_dataset, sampler=val_sampler, batch_size=1)
 
-# Training loop
-epochs = 300
+
+
+# Validation step
+def validate_branch_1():
+    """Branch 1: All ranks perform validation and results are aggregated."""
+    model.eval()
+    val_loss = 0.0
+
+    # Start timing for the entire validation dataset
+    start_time = time.time()
+
+    with torch.no_grad():
+        for val_input_ids, val_attention_mask, val_labels in val_dataloader:
+            val_input_ids = val_input_ids.to(device)
+            val_attention_mask = val_attention_mask.to(device)
+            val_labels = val_labels.to(device)
+
+            val_outputs = model(
+                input_ids=val_input_ids,
+                attention_mask=val_attention_mask,
+                labels=val_labels,
+            )
+            val_loss += val_outputs.loss.item()
+
+    # End timing for the entire validation dataset
+    total_inference_time = time.time() - start_time
+
+    # Calculate and synchronize results across all ranks
+    avg_val_loss = torch.tensor(val_loss / len(val_dataloader)).to(device)
+    total_inference_time = torch.tensor(total_inference_time).to(device)
+    dist.all_reduce(avg_val_loss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_inference_time, op=dist.ReduceOp.SUM)
+
+    avg_val_loss /= size
+    total_inference_time /= size  # Averaged across ranks
+
+    return avg_val_loss.item(), total_inference_time.item()
+
+
+def validate_branch_2():
+    """Branch 2: Only rank 0 performs validation for the entire dataset."""
+    if rank == 0:
+        model.eval()
+        val_loss = 0.0
+
+        # Start timing for the entire validation dataset
+        start_time = time.time()
+
+        with torch.no_grad():
+            for val_input_ids, val_attention_mask, val_labels in val_dataloader:
+                val_input_ids = val_input_ids.to(device)
+                val_attention_mask = val_attention_mask.to(device)
+                val_labels = val_labels.to(device)
+
+                val_outputs = model(
+                    input_ids=val_input_ids,
+                    attention_mask=val_attention_mask,
+                    labels=val_labels,
+                )
+                val_loss += val_outputs.loss.item()
+
+        # End timing for the entire validation dataset
+        total_inference_time = time.time() - start_time
+
+        avg_val_loss = val_loss / len(val_dataloader)
+        return avg_val_loss, total_inference_time
+    else:
+        return None, None
+# Main training loop
+epochs = 100
+
+print(f"branch = {branch}  # Set branch (1 for all ranks, 2 for only rank 0)")
 for epoch in range(epochs):
+    epoch_start_time = time.time()
+
     model.train()
     train_sampler.set_epoch(epoch)  # Shuffle data for each epoch
     epoch_loss = 0.0
@@ -139,39 +211,34 @@ for epoch in range(epochs):
         optimizer.step()
         epoch_loss += loss.item()
 
-    # Validation step (only rank 0 logs validation results)
+    # Calculate epoch time
+    epoch_time = time.time() - epoch_start_time
+
+    # Perform validation based on the selected branch
+    if branch == 1:
+        avg_val_loss, avg_inference_time = validate_branch_1()
+    else:
+        avg_val_loss, avg_inference_time = validate_branch_2()
+
+    # Log results
     if rank == 0:
-        model.eval()
-        val_loss = 0.0
-        inference_times = []  # Track inference times
-
-        with torch.no_grad():
-            for val_input_ids, val_attention_mask, val_labels in val_dataloader:
-                val_input_ids = val_input_ids.to(device)
-                val_attention_mask = val_attention_mask.to(device)
-                val_labels = val_labels.to(device)
-
-                # Measure inference time
-                start_time = time.time()
-                val_outputs = model(
-                    input_ids=val_input_ids,
-                    attention_mask=val_attention_mask,
-                    labels=val_labels,
-                )
-                elapsed_time = time.time() - start_time
-                inference_times.append(elapsed_time)
-
-                val_loss += val_outputs.loss.item()
-
-        avg_inference_time = sum(inference_times) / len(inference_times)
-        wandb.log({"Epoch": epoch + 1, "Training Loss": epoch_loss / len(train_dataloader),
-                   "Validation Loss": val_loss / len(val_dataloader), "Avg Inference Time (s)": avg_inference_time})
+        wandb.log({
+            "Epoch": epoch + 1,
+            "Training Loss": epoch_loss / len(train_dataloader),
+            "Validation Loss": avg_val_loss,
+            "Avg Inference Time (s)": avg_inference_time,
+            "Epoch Time (s)": epoch_time,
+        })
 
         logging.info(f"Epoch {epoch + 1}, Training Loss: {epoch_loss / len(train_dataloader)}, "
-                     f"Validation Loss: {val_loss / len(val_dataloader)}, "
-                     f"Avg Inference Time: {avg_inference_time:.4f}s")
+                     f"Validation Loss: {avg_val_loss}, "
+                     f"Avg Inference Time: {avg_inference_time:.4f}s, "
+                     f"Epoch Time: {epoch_time:.4f}s")
 
 # Cleanup
 dist.destroy_process_group()
 if rank == 0:
     wandb.finish()
+    
+print("Done!")
+

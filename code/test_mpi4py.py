@@ -9,26 +9,37 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 import wandb
 from datasets import load_dataset
+from tqdm import tqdm
+import argparse
+
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-branch = 1  # Set branch (1 for all ranks, 2 for only rank 0)
+
+
+branch = 2  # Set branch (1 for all ranks, 2 for only rank 0)
+node = 2  # Set number of nodes
+gpu = 1  # Set number of GPUs in each node
 # Initialize wandb (only on rank 0)
+text = 'inference in rank0' if branch == 2 else 'inference in all ranks' 
+
+
 if MPI.COMM_WORLD.Get_rank() == 0:
-    wandb.init(project="llama-distributed", name="2 nodes, 1 gpu in each node; inference in all ranks")
+    wandb.init(project="llama-distributed", name=f"{node} nodes, {gpu} gpu in each node; {text}")
 
 # Initialize MPI
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
-
-# Ensure MASTER_ADDR and MASTER_PORT are set
-os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-os.environ.setdefault("MASTER_PORT", "12345")
+PID  = os.getpid()
+print(f"rank = {rank}, size = {size}, PID = {PID}")
 
 # Map rank to available GPUs
 gpu_ids = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+print("gpu_ids = ", gpu_ids)
 device_id = int(gpu_ids[rank % len(gpu_ids)])
+print("device_id = ", device_id)
 torch.cuda.set_device(device_id)
 device = torch.device(f"cuda:{device_id}")
 
@@ -48,16 +59,9 @@ model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device_id],
 # Optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
 
-
-from datasets import load_dataset
-from transformers import AutoTokenizer
-from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
-import torch
-
 # Load a subset of the SQuAD 2.0 dataset
-NUM_TRAIN_EXAMPLES = 100  # Define the number of training examples to use
-NUM_VAL_EXAMPLES = 10  # Define the number of validation examples to use
+NUM_TRAIN_EXAMPLES = 500  # Define the number of training examples to use
+NUM_VAL_EXAMPLES = 50  # Define the number of validation examples to use
 
 dataset = load_dataset("squad_v2")
 train_data = dataset["train"].select(range(min(len(dataset["train"]), NUM_TRAIN_EXAMPLES)))
@@ -76,10 +80,6 @@ def preprocess_function(examples):
     labels = inputs.input_ids
     return {"input_ids": inputs.input_ids, "attention_mask": inputs.attention_mask, "labels": labels}
 
-# Preprocess datasets
-train_data = train_data.map(preprocess_function, batched=True, remove_columns=train_data.column_names)
-validation_data = validation_data.map(preprocess_function, batched=True, remove_columns=validation_data.column_names)
-
 # Custom Dataset class
 class CustomDataset(Dataset):
     def __init__(self, data):
@@ -95,6 +95,11 @@ class CustomDataset(Dataset):
             torch.tensor(self.data["labels"][idx]),
         )
 
+
+# Preprocess datasets
+train_data = train_data.map(preprocess_function, batched=True, remove_columns=train_data.column_names)
+validation_data = validation_data.map(preprocess_function, batched=True, remove_columns=validation_data.column_names)
+
 # Convert processed data into custom datasets
 train_dataset = CustomDataset(train_data)
 validation_dataset = CustomDataset(validation_data)
@@ -107,7 +112,6 @@ val_sampler = DistributedSampler(validation_dataset, num_replicas=size, rank=ran
 val_dataloader = DataLoader(validation_dataset, sampler=val_sampler, batch_size=1)
 
 
-
 # Validation step
 def validate_branch_1():
     """Branch 1: All ranks perform validation and results are aggregated."""
@@ -116,7 +120,7 @@ def validate_branch_1():
 
     # Start timing for the entire validation dataset
     start_time = time.time()
-
+    print("the length of val_dataloader is ", len(val_dataloader))
     with torch.no_grad():
         for val_input_ids, val_attention_mask, val_labels in val_dataloader:
             val_input_ids = val_input_ids.to(device)
@@ -144,7 +148,6 @@ def validate_branch_1():
 
     return avg_val_loss.item(), total_inference_time.item()
 
-
 def validate_branch_2():
     """Branch 2: Only rank 0 performs validation for the entire dataset."""
     if rank == 0:
@@ -153,7 +156,7 @@ def validate_branch_2():
 
         # Start timing for the entire validation dataset
         start_time = time.time()
-
+        # assert len(val_dataloader) == validation_dataset.__len__()/size, "the length of val_dataloader is " + str(len(val_dataloader)) + ", the length of validation_dataset is " + str(validation_dataset.__len__()/size)
         with torch.no_grad():
             for val_input_ids, val_attention_mask, val_labels in val_dataloader:
                 val_input_ids = val_input_ids.to(device)
@@ -177,15 +180,17 @@ def validate_branch_2():
 # Main training loop
 epochs = 100
 
-print(f"branch = {branch}  # Set branch (1 for all ranks, 2 for only rank 0)")
-for epoch in range(epochs):
+print (f"rank = {rank}  # Set rank (0 for master, 1 for worker)")
+print(f"size = {size}  # Set number of processes")
+print(f"validation strategy is {branch}  # Set branch (1 for all ranks, 2 for only rank 0)")
+for epoch in (range(epochs)):
     epoch_start_time = time.time()
 
     model.train()
     train_sampler.set_epoch(epoch)  # Shuffle data for each epoch
     epoch_loss = 0.0
 
-    for batch_input_ids, batch_attention_mask, batch_labels in train_dataloader:
+    for batch_input_ids, batch_attention_mask, batch_labels in (train_dataloader ):
         batch_input_ids = batch_input_ids.to(device)
         batch_attention_mask = batch_attention_mask.to(device)
         batch_labels = batch_labels.to(device)
@@ -213,7 +218,7 @@ for epoch in range(epochs):
 
     # Calculate epoch time
     epoch_time = time.time() - epoch_start_time
-
+    
     # Perform validation based on the selected branch
     if branch == 1:
         avg_val_loss, avg_inference_time = validate_branch_1()
@@ -242,3 +247,29 @@ if rank == 0:
     
 print("Done!")
 
+def main(branch, number_of_nodes, number_of_gpus):
+    # Initialize MPI
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    PID  = os.getpid()
+    print(f"rank = {rank}, size = {size}, PID = {PID}")
+
+    # Ensure MASTER_ADDR and MASTER_PORT are set
+    os.environ.setdefault("MASTER_ADDR", "  
+
+
+if __name__ == "__main__":
+  parser = argparse.ArgumentParser(description="Distributed training with MPI and PyTorch")
+  parser.add_argument("--branch", type=int, default=1, help="Branch to execute (1 or 2)")
+  parser.add_argument("--node", type=int, default=2, help="Number of nodes")
+  parser.add_argument("--gpu", type=int, default=1, help="Number of GPUs in each node")
+  args = parser.parse_args()
+  number_of_nodes = args.node
+  number_of_gpus = args.gpu
+  branch = args.branch
+  print(f"branch = {branch}, node = {number_of_nodes}, gpu = {number_of_gpus}")
+  main(branch, number_of_nodes, number_of_gpus)
+    
+    
+  

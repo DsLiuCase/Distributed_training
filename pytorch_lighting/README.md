@@ -43,6 +43,8 @@ python create_squad_dataset.py
 sbatch slurm_X_Y.sh
 ```
 
+Where X is the number of nodes and Y is the number of GPUs per node.
+
 ## Logging and Monitoring
 
 You can view detailed reports of:
